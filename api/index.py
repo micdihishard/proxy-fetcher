@@ -9,38 +9,40 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
+V4_API = "https://api.proxyscrape.com/v4/free-proxy-list/get?request=get_proxies&proxy_format=protocolipport&format=json&timeout=5000"
+
 SOURCES = {
-    "http": [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=all&anonymity=all",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    ],
-    "https": [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=3000&country=all&ssl=all&anonymity=all",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/https.txt",
-    ],
-    "socks4": [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=3000&country=all",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
-    ],
-    "socks5": [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-    ],
+    "http": f"{V4_API}&protocol=http",
+    "https": f"{V4_API}&protocol=https",
+    "socks4": f"{V4_API}&protocol=socks4",
+    "socks5": f"{V4_API}&protocol=socks5",
 }
 
 TEST_URL = "http://httpbin.org/ip"
 
 _cache = {}
 CACHE_TTL = 60
-MAX_TEST = 40
-TIMEOUT = (0.8, 1.0)
+MAX_TEST = 30
+TIMEOUT = (1, 2)
 
 
-def _fetch(url):
+def _fetch_v4(ptype):
+    url = SOURCES.get(ptype)
+    if not url:
+        return []
     try:
-        r = requests.get(url, timeout=3)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         if r.status_code == 200:
-            return [l.strip() for l in r.text.split("\n") if l.strip() and ":" in l]
+            data = r.json()
+            proxies = []
+            for p in data.get("proxies", []):
+                if p.get("alive"):
+                    proto = p.get("protocol", ptype)
+                    proxy = f"{proto}://{p['ip']}:{p['port']}"
+                    avg = p.get("average_timeout", 9999)
+                    proxies.append((proxy, avg))
+            proxies.sort(key=lambda x: x[1])
+            return proxies
     except:
         pass
     return []
@@ -52,37 +54,34 @@ def _get_proxies(ptype):
     if c and (now - c["ts"]) < CACHE_TTL:
         return c["list"]
 
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = [ex.submit(_fetch, u) for u in SOURCES.get(ptype, [])]
-        all_p = []
-        for f in as_completed(futs):
-            all_p.extend(f.result())
-
-    unique = list(dict.fromkeys(all_p))
-    random.shuffle(unique)
-    _cache[ptype] = {"list": unique, "ts": now}
-    return unique
+    raw = _fetch_v4(ptype)
+    random.shuffle(raw)
+    _cache[ptype] = {"list": raw, "ts": now}
+    return raw
 
 
-def _test(proxy, ptype):
-    schemes = {"socks5": "socks5", "socks4": "socks4"}
-    scheme = schemes.get(ptype, "http")
-    purl = f"{scheme}://{proxy}"
+def _test(proxy_url):
     try:
         s = time.perf_counter()
-        r = requests.get(TEST_URL, proxies={"http": purl, "https": purl}, timeout=TIMEOUT, verify=False)
+        r = requests.get(
+            TEST_URL,
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=TIMEOUT,
+            verify=False,
+        )
         ms = round((time.perf_counter() - s) * 1000, 2)
         if r.status_code == 200:
-            return (proxy, ms)
+            return (proxy_url, ms)
     except:
         pass
     return None
 
 
-def _bench(proxies, ptype, top_n):
+def _bench(proxies, top_n):
+    urls = [p[0] for p in proxies[:MAX_TEST]]
     results = []
-    with ThreadPoolExecutor(max_workers=40) as ex:
-        futs = {ex.submit(_test, p, ptype): p for p in proxies[:MAX_TEST]}
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        futs = {ex.submit(_test, u): u for u in urls}
         for f in as_completed(futs):
             r = f.result()
             if r:
@@ -104,16 +103,16 @@ def fetch():
 
     proxies = _get_proxies(ptype)
     if not proxies:
-        return jsonify({"status": "error", "message": f"No {ptype} proxies", "time_ms": elapsed(t0)}), 500
+        return jsonify({"status": "error", "message": f"No {ptype} proxies", "time_ms": ms(t0)}), 500
 
-    fastest = _bench(proxies, ptype, top_n)
+    fastest = _bench(proxies, top_n)
     return jsonify({
         "status": "success",
         "type": ptype,
         "total": len(proxies),
         "tested": min(MAX_TEST, len(proxies)),
         "count": len(fastest),
-        "time_ms": elapsed(t0),
+        "time_ms": ms(t0),
         "fastest": [{"proxy": p, "latency_ms": l} for p, l in fastest],
     })
 
@@ -130,9 +129,9 @@ def fastest():
     if not proxies:
         return jsonify({"error": f"No {ptype} proxies"}), 500
 
-    top = _bench(proxies, ptype, 1)
+    top = _bench(proxies, 1)
     if top:
-        return jsonify({"type": ptype, "proxy": top[0][0], "latency_ms": top[0][1], "time_ms": elapsed(t0)})
+        return jsonify({"type": ptype, "proxy": top[0][0], "latency_ms": top[0][1], "time_ms": ms(t0)})
     return jsonify({"error": "no working proxy"}), 500
 
 
@@ -141,5 +140,5 @@ def health():
     return jsonify({"status": "ok"})
 
 
-def elapsed(t0):
+def ms(t0):
     return round((time.perf_counter() - t0) * 1000, 2)
