@@ -1,14 +1,14 @@
 {
   "builds": [
     {
-      "src": "proxy_fetcher.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "proxy_fetcher.py"
+      "dest": "api/index.py"
     }
   ]
 }
