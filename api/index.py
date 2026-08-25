@@ -115,7 +115,7 @@ def fetch():
         "status": "success",
         "type": ptype,
         "total": len(proxies),
-        "tested": min(MAX_TEST, len(proxies)),
+        "tested": min(MAX_TEST.get(ptype, 50), len(proxies)),
         "count": len(fastest),
         "time_ms": ms(t0),
         "fastest": [{"proxy": p, "latency_ms": l} for p, l in fastest],
